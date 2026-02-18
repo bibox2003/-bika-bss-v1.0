@@ -1,0 +1,49 @@
+name: django_wrapper
+description: Flutter mobile app for Django backend (mobile-first UX with native auth and API integration).
+publish_to: 'none'
+
+version: 1.1.0+2
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # UI
+  cupertino_icons: ^1.0.8
+
+  # Network / API
+  http: ^1.2.2
+  connectivity_plus: ^6.1.1
+
+  # Secure token storage
+  flutter_secure_storage: ^9.2.2
+
+  # State management (lightweight, clean for our auth/dashboard flow)
+  provider: ^6.1.2
+
+  # Local persistence for lightweight cache/settings
+  shared_preferences: ^2.3.2
+
+  # Date/time formatting for logs, timeline, dashboard cards
+  intl: ^0.19.0
+
+  # Optional: keep only if you still need any embedded web page fallback
+  # If you are fully native now, we can remove this in the next cleanup step.
+  webview_flutter: ^4.10.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+
+  # Add assets here when needed
+  # assets:
+  #   - assets/images/
+  #   - assets/icons/
+
