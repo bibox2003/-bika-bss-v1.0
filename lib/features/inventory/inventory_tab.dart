@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+
 import '../../services/auth_service.dart';
 import '../../services/api_client.dart';
 import 'inventory_service.dart';
 import 'product_model.dart';
+import '../cart/cart_service.dart';
 
 enum StockFilter { all, inStock, lowStock }
 
@@ -14,7 +16,8 @@ class InventoryTab extends StatefulWidget {
 }
 
 class _InventoryTabState extends State<InventoryTab> {
-  late final InventoryService _service;
+  late final InventoryService _inventory;
+  late final CartService _cart;
 
   bool _loading = true;
   bool _mineOnly = false;
@@ -28,7 +31,9 @@ class _InventoryTabState extends State<InventoryTab> {
   @override
   void initState() {
     super.initState();
-    _service = InventoryService(ApiClient(AuthService()));
+    final api = ApiClient(AuthService());
+    _inventory = InventoryService(api);
+    _cart = CartService(api);
     _load();
   }
 
@@ -45,9 +50,11 @@ class _InventoryTabState extends State<InventoryTab> {
     });
 
     try {
-      final data = await _service.fetchProducts(mineOnly: _mineOnly);
+      final data = await _inventory.fetchProducts(mineOnly: _mineOnly);
+      if (!mounted) return;
       setState(() => _products = data);
     } catch (e) {
+      if (!mounted) return;
       setState(() => _error = e.toString());
     } finally {
       if (mounted) setState(() => _loading = false);
@@ -94,6 +101,84 @@ class _InventoryTabState extends State<InventoryTab> {
     return list;
   }
 
+  Future<void> _openCreate() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => ProductEditorDialog(
+        title: 'Add Product',
+        onSubmit: (draft) async {
+          await _inventory.createProduct(
+            name: draft.name,
+            sku: draft.sku,
+            price: draft.price,
+            stockQuantity: draft.stockQuantity,
+            status: draft.isActive ? 'active' : 'out_of_stock',
+          );
+        },
+      ),
+    );
+
+    if (ok == true) await _load();
+  }
+
+  Future<void> _openEdit(Product p) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => ProductEditorDialog(
+        title: 'Edit Product',
+        initial: ProductDraft.fromProduct(p),
+        onSubmit: (draft) async {
+          await _inventory.updateProduct(
+            id: p.id,
+            name: draft.name,
+            sku: draft.sku,
+            price: draft.price,
+            stockQuantity: draft.stockQuantity,
+            status: draft.isActive ? 'active' : 'out_of_stock',
+          );
+        },
+      ),
+    );
+
+    if (ok == true) await _load();
+  }
+
+  Future<void> _delete(Product p) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Delete product?'),
+        content: Text('This will delete "${p.name}" permanently.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    try {
+      await _inventory.deleteProduct(p.id);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Product deleted successfully')),
+      );
+      await _load();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Delete failed: $e')),
+      );
+    }
+  }
+
   Future<void> _openActions(Product p) async {
     if (!mounted) return;
 
@@ -110,12 +195,17 @@ class _InventoryTabState extends State<InventoryTab> {
               children: [
                 ListTile(
                   contentPadding: EdgeInsets.zero,
-                  leading: const CircleAvatar(
-                      child: Icon(Icons.inventory_2_outlined)),
-                  title: Text(p.name,
-                      style: const TextStyle(fontWeight: FontWeight.w700)),
-                  subtitle:
-                      Text('Stock: ${p.stockQuantity} • SKU: ${p.sku ?? "-"}'),
+                  leading: CircleAvatar(
+                    child:
+                        Text(p.name.isNotEmpty ? p.name[0].toUpperCase() : '?'),
+                  ),
+                  title: Text(
+                    p.name,
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                  subtitle: Text(
+                    'Stock: ${p.stockQuantity} • SKU: ${p.sku ?? "-"} • Price: ${p.price ?? "-"}',
+                  ),
                 ),
                 const SizedBox(height: 8),
                 ListTile(
@@ -143,11 +233,28 @@ class _InventoryTabState extends State<InventoryTab> {
                   },
                 ),
                 ListTile(
+                  leading: const Icon(Icons.edit_outlined),
+                  title: const Text('Edit Product'),
+                  onTap: () async {
+                    Navigator.pop(context);
+                    await _openEdit(p);
+                  },
+                ),
+                ListTile(
                   leading: const Icon(Icons.info_outline),
                   title: const Text('View Details'),
                   onTap: () async {
                     Navigator.pop(context);
                     await _showProductDetails(p.id);
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.delete_outline, color: Colors.red),
+                  title: const Text('Delete Product',
+                      style: TextStyle(color: Colors.red)),
+                  onTap: () async {
+                    Navigator.pop(context);
+                    await _delete(p);
                   },
                 ),
               ],
@@ -160,7 +267,7 @@ class _InventoryTabState extends State<InventoryTab> {
 
   Future<void> _adjustStock(Product p, int delta) async {
     try {
-      await _service.adjustStock(productId: p.id, delta: delta);
+      await _inventory.adjustStock(productId: p.id, delta: delta);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Stock updated for ${p.name}')),
@@ -197,9 +304,11 @@ class _InventoryTabState extends State<InventoryTab> {
                           qty > 1 ? () => setLocalState(() => qty--) : null,
                       icon: const Icon(Icons.remove_circle_outline),
                     ),
-                    Text('$qty',
-                        style: const TextStyle(
-                            fontSize: 18, fontWeight: FontWeight.w700)),
+                    Text(
+                      '$qty',
+                      style: const TextStyle(
+                          fontSize: 18, fontWeight: FontWeight.w700),
+                    ),
                     IconButton(
                       onPressed: () => setLocalState(() => qty++),
                       icon: const Icon(Icons.add_circle_outline),
@@ -210,11 +319,13 @@ class _InventoryTabState extends State<InventoryTab> {
             ),
             actions: [
               TextButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  child: const Text('Cancel')),
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel'),
+              ),
               FilledButton(
-                  onPressed: () => Navigator.pop(ctx, qty),
-                  child: const Text('Add')),
+                onPressed: () => Navigator.pop(ctx, qty),
+                child: const Text('Add'),
+              ),
             ],
           ),
         );
@@ -224,7 +335,7 @@ class _InventoryTabState extends State<InventoryTab> {
     if (result == null) return;
 
     try {
-      await _service.addToCart(productId: p.id, quantity: result);
+      await _cart.addToCart(productId: p.id, quantity: result);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('${p.name} added to cart (x$result)')),
@@ -239,7 +350,7 @@ class _InventoryTabState extends State<InventoryTab> {
 
   Future<void> _showProductDetails(int productId) async {
     try {
-      final product = await _service.fetchProductDetail(productId);
+      final product = await _inventory.fetchProductDetail(productId);
       if (!mounted) return;
 
       showDialog(
@@ -249,6 +360,7 @@ class _InventoryTabState extends State<InventoryTab> {
           content: SingleChildScrollView(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
               children: [
                 _d('SKU', product.sku ?? '-'),
                 _d('Price', product.price ?? '-'),
@@ -265,6 +377,7 @@ class _InventoryTabState extends State<InventoryTab> {
                     product.createdByName ?? product.vendorName ?? '-'),
                 _d('Unit', product.unitName ?? '-'),
                 _d('Created', _formatDate(product.createdAt)),
+                _d('Last Updated', _formatDate(product.updatedAt)),
                 const SizedBox(height: 8),
                 const Text('Description',
                     style: TextStyle(fontWeight: FontWeight.w700)),
@@ -314,32 +427,50 @@ class _InventoryTabState extends State<InventoryTab> {
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(12, 12, 12, 24),
         children: [
-          Card(
-            elevation: 0,
-            child: Padding(
-              padding: const EdgeInsets.all(14),
-              child: Row(
-                children: [
-                  const CircleAvatar(
-                      radius: 20, child: Icon(Icons.inventory_2_outlined)),
-                  const SizedBox(width: 12),
-                  const Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+          Row(
+            children: [
+              Expanded(
+                child: Card(
+                  elevation: 0,
+                  child: Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Row(
                       children: [
-                        Text('Inventory',
-                            style: TextStyle(
-                                fontSize: 18, fontWeight: FontWeight.w700)),
-                        SizedBox(height: 2),
-                        Text('Tap a product for quick actions',
-                            style: TextStyle(fontSize: 13)),
+                        const CircleAvatar(
+                          radius: 20,
+                          child: Icon(Icons.inventory_2_outlined),
+                        ),
+                        const SizedBox(width: 12),
+                        const Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('Inventory',
+                                  style: TextStyle(
+                                      fontSize: 18,
+                                      fontWeight: FontWeight.w700)),
+                              SizedBox(height: 2),
+                              Text('Tap a product for quick actions',
+                                  style: TextStyle(fontSize: 13)),
+                            ],
+                          ),
+                        ),
+                        IconButton(
+                          onPressed: _load,
+                          icon: const Icon(Icons.refresh),
+                        ),
                       ],
                     ),
                   ),
-                  IconButton(onPressed: _load, icon: const Icon(Icons.refresh)),
-                ],
+                ),
               ),
-            ),
+              const SizedBox(width: 10),
+              FilledButton.icon(
+                onPressed: _openCreate,
+                icon: const Icon(Icons.add),
+                label: const Text('Add'),
+              )
+            ],
           ),
           const SizedBox(height: 10),
           Card(
@@ -441,38 +572,233 @@ class _InventoryTabState extends State<InventoryTab> {
               child: ListTile(
                 leading: Icon(Icons.inbox_outlined),
                 title: Text('No products match your filters'),
-                subtitle: Text('Try changing search/filter or refresh'),
+                subtitle:
+                    Text('Try changing search/filter or add a new product'),
               ),
             )
           else
-            ...displayed.map(
-              (p) => Card(
+            ...displayed.map((p) {
+              final outOfStock = p.stockQuantity <= 0;
+              final lowStock = p.stockQuantity > 0 && p.stockQuantity < 5;
+
+              return Card(
                 elevation: 0,
                 margin: const EdgeInsets.only(bottom: 10),
                 child: ListTile(
                   onTap: () => _openActions(p),
-                  leading: const CircleAvatar(child: Icon(Icons.inventory)),
+                  leading: CircleAvatar(
+                    child:
+                        Text(p.name.isNotEmpty ? p.name[0].toUpperCase() : '?'),
+                  ),
                   title: Text(p.name,
                       style: const TextStyle(fontWeight: FontWeight.w700)),
                   subtitle: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       const SizedBox(height: 4),
+                      Text('SKU: ${p.sku ?? "-"} • Price: ${p.price ?? "-"}'),
                       Text(
-                          'Stock: ${p.stockQuantity} • Price: ${p.price ?? "-"}'),
-                      Text('Category: ${p.categoryName ?? "-"}'),
+                          'Stock: ${p.stockQuantity} • Category: ${p.categoryName ?? "-"}'),
                       Text(
                           'Added by: ${p.createdByName ?? p.vendorName ?? "-"}'),
                       Text('Unit: ${p.unitName ?? "-"}'),
                       Text('Created: ${_formatDate(p.createdAt)}'),
                     ],
                   ),
-                  trailing: const Icon(Icons.chevron_right),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (outOfStock)
+                        const Icon(Icons.remove_shopping_cart_outlined,
+                            color: Colors.red)
+                      else if (lowStock)
+                        const Icon(Icons.warning_amber_outlined,
+                            color: Colors.orange),
+                      const SizedBox(width: 8),
+                      const Icon(Icons.chevron_right),
+                    ],
+                  ),
                 ),
-              ),
-            ),
+              );
+            }),
         ],
       ),
+    );
+  }
+}
+
+class ProductDraft {
+  final String name;
+  final String sku;
+  final String price;
+  final int stockQuantity;
+  final bool isActive;
+
+  const ProductDraft({
+    required this.name,
+    required this.sku,
+    required this.price,
+    required this.stockQuantity,
+    required this.isActive,
+  });
+
+  factory ProductDraft.fromProduct(Product p) => ProductDraft(
+        name: p.name,
+        sku: p.sku ?? '',
+        price: p.price ?? '0',
+        stockQuantity: p.stockQuantity,
+        isActive: (p.status ?? 'active') == 'active',
+      );
+}
+
+class ProductEditorDialog extends StatefulWidget {
+  final String title;
+  final ProductDraft? initial;
+  final Future<void> Function(ProductDraft value) onSubmit;
+
+  const ProductEditorDialog({
+    super.key,
+    required this.title,
+    required this.onSubmit,
+    this.initial,
+  });
+
+  @override
+  State<ProductEditorDialog> createState() => _ProductEditorDialogState();
+}
+
+class _ProductEditorDialogState extends State<ProductEditorDialog> {
+  late final TextEditingController _name;
+  late final TextEditingController _sku;
+  late final TextEditingController _price;
+  late final TextEditingController _qty;
+
+  bool _active = true;
+  bool _saving = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    final i = widget.initial;
+    _name = TextEditingController(text: i?.name ?? '');
+    _sku = TextEditingController(text: i?.sku ?? '');
+    _price = TextEditingController(text: i?.price ?? '0');
+    _qty = TextEditingController(text: (i?.stockQuantity ?? 0).toString());
+    _active = i?.isActive ?? true;
+  }
+
+  @override
+  void dispose() {
+    _name.dispose();
+    _sku.dispose();
+    _price.dispose();
+    _qty.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final name = _name.text.trim();
+    final sku = _sku.text.trim();
+    final price = _price.text.trim();
+    final qty = int.tryParse(_qty.text.trim()) ?? -1;
+
+    if (name.isEmpty || sku.isEmpty || price.isEmpty || qty < 0) {
+      setState(() => _error = 'Fill all fields (quantity must be >= 0).');
+      return;
+    }
+
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+
+    try {
+      await widget.onSubmit(ProductDraft(
+        name: name,
+        sku: sku,
+        price: price,
+        stockQuantity: qty,
+        isActive: _active,
+      ));
+      if (!mounted) return;
+      Navigator.of(context).pop(true);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = e.toString());
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(widget.title),
+      content: SingleChildScrollView(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: _name,
+                decoration: const InputDecoration(
+                  labelText: 'Name',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _sku,
+                decoration: const InputDecoration(
+                  labelText: 'SKU (unique)',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _price,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'Price',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _qty,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'Stock Quantity',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 10),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: _active,
+                onChanged: (v) => setState(() => _active = v),
+                title: const Text('Active'),
+              ),
+              if (_error != null) ...[
+                const SizedBox(height: 10),
+                Text(_error!, style: const TextStyle(color: Colors.red)),
+              ],
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _saving ? null : () => Navigator.pop(context, false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: _saving ? null : _save,
+          child: _saving ? const Text('Saving...') : const Text('Save'),
+        ),
+      ],
     );
   }
 }

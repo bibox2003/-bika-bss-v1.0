@@ -36,7 +36,7 @@ class AuthService {
   }
 
   // ---------------------------------------------------------------------------
-  // Native login (optional, still useful for fallback)
+  // Native login (JWT)
   // ---------------------------------------------------------------------------
   Future<Map<String, dynamic>> login({
     required String username,
@@ -46,8 +46,11 @@ class AuthService {
 
     final response = await http.post(
       uri,
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'username': username, 'password': password}),
+      headers: const {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'username': username,
+        'password': password,
+      }),
     );
 
     if (response.statusCode == 200) {
@@ -64,13 +67,21 @@ class AuthService {
 
       await saveTokens(access: access, refresh: refresh);
       return data;
-    } else if (response.statusCode == 401) {
+    }
+
+    if (response.statusCode == 401) {
       throw Exception('Invalid username or password.');
-    } else {
+    }
+
+    if (response.statusCode == 404) {
       throw Exception(
-        'Login failed (${response.statusCode}): ${response.body}',
+        'Login endpoint not found (404). Check Django URL: /api/token/',
       );
     }
+
+    throw Exception(
+      'Login failed (${response.statusCode}): ${response.body}',
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -83,7 +94,7 @@ class AuthService {
     final uri = Uri.parse('$_baseUrl/api/token/refresh/');
     final response = await http.post(
       uri,
-      headers: {'Content-Type': 'application/json'},
+      headers: const {'Content-Type': 'application/json'},
       body: jsonEncode({'refresh': refresh}),
     );
 
@@ -96,13 +107,54 @@ class AuthService {
         return true;
       }
     }
+
     return false;
   }
 
   // ---------------------------------------------------------------------------
-  // Generic authorized GET helper (retries once after refresh on 401)
+  // Generic authorized helpers (retry once after refresh on 401)
   // ---------------------------------------------------------------------------
   Future<http.Response> authorizedGet(String endpoint) async {
+    return _authorizedRequest(
+      method: 'GET',
+      endpoint: endpoint,
+    );
+  }
+
+  Future<http.Response> authorizedPost(
+    String endpoint, {
+    Map<String, dynamic>? body,
+  }) async {
+    return _authorizedRequest(
+      method: 'POST',
+      endpoint: endpoint,
+      body: body,
+    );
+  }
+
+  Future<http.Response> authorizedPatch(
+    String endpoint, {
+    Map<String, dynamic>? body,
+  }) async {
+    return _authorizedRequest(
+      method: 'PATCH',
+      endpoint: endpoint,
+      body: body,
+    );
+  }
+
+  Future<http.Response> authorizedDelete(String endpoint) async {
+    return _authorizedRequest(
+      method: 'DELETE',
+      endpoint: endpoint,
+    );
+  }
+
+  Future<http.Response> _authorizedRequest({
+    required String method,
+    required String endpoint,
+    Map<String, dynamic>? body,
+  }) async {
     String? access = await getAccessToken();
     if (access == null || access.isEmpty) {
       throw Exception('No access token found. Please login.');
@@ -110,13 +162,35 @@ class AuthService {
 
     final uri = Uri.parse('$_baseUrl$endpoint');
 
-    http.Response response = await http.get(
-      uri,
-      headers: {
-        'Authorization': 'Bearer $access',
+    Future<http.Response> send(String token) {
+      final headers = {
+        'Authorization': 'Bearer $token',
         'Content-Type': 'application/json',
-      },
-    );
+      };
+
+      switch (method.toUpperCase()) {
+        case 'GET':
+          return http.get(uri, headers: headers);
+        case 'POST':
+          return http.post(
+            uri,
+            headers: headers,
+            body: body == null ? null : jsonEncode(body),
+          );
+        case 'PATCH':
+          return http.patch(
+            uri,
+            headers: headers,
+            body: body == null ? null : jsonEncode(body),
+          );
+        case 'DELETE':
+          return http.delete(uri, headers: headers);
+        default:
+          throw Exception('Unsupported method: $method');
+      }
+    }
+
+    http.Response response = await send(access);
 
     if (response.statusCode == 401) {
       final refreshed = await refreshAccessToken();
@@ -125,13 +199,11 @@ class AuthService {
       }
 
       access = await getAccessToken();
-      response = await http.get(
-        uri,
-        headers: {
-          'Authorization': 'Bearer $access',
-          'Content-Type': 'application/json',
-        },
-      );
+      if (access == null || access.isEmpty) {
+        throw Exception('Session expired. Please login again.');
+      }
+
+      response = await send(access);
     }
 
     return response;
@@ -159,7 +231,6 @@ class AuthService {
     final access = await getAccessToken();
     if (access == null || access.isEmpty) return false;
 
-    // Optional stronger check: ping /me endpoint
     try {
       final res = await authorizedGet('/api/v1/me/');
       return res.statusCode == 200;

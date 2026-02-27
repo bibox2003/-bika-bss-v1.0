@@ -17,6 +17,7 @@ class _CartTabState extends State<CartTab> {
 
   bool _loading = true;
   String? _error;
+  Cart? _cart;
   List<CartItem> _items = [];
 
   @override
@@ -33,8 +34,27 @@ class _CartTabState extends State<CartTab> {
     });
 
     try {
-      final data = await _service.fetchCartItems();
-      setState(() => _items = data);
+      // Try to get full cart object first
+      try {
+        final cart = await _service.getCart();
+        setState(() {
+          _cart = cart;
+          _items = cart.items;
+        });
+      } catch (e) {
+        // Fallback to fetching items list
+        final items = await _service.fetchCartItems();
+        setState(() {
+          _items = items;
+          _cart = Cart(
+            id: 0,
+            items: items,
+            subtotal: _calculateSubtotal(items).toStringAsFixed(2),
+            total: _calculateSubtotal(items).toStringAsFixed(2),
+            itemCount: items.length,
+          );
+        });
+      }
     } catch (e) {
       setState(() => _error = e.toString());
     } finally {
@@ -50,15 +70,32 @@ class _CartTabState extends State<CartTab> {
     return v.toStringAsFixed(2);
   }
 
-  double get _subtotal {
+  double _calculateSubtotal(List<CartItem> items) {
     double sum = 0;
-    for (final i in _items) {
+    for (final i in items) {
       sum += _toDouble(i.totalPrice);
     }
     return sum;
   }
 
+  double _calculateTotal(Cart cart) {
+    if (cart.totalValue > 0) return cart.totalValue;
+
+    double total = 0;
+    for (final i in cart.items) {
+      total += _toDouble(i.unitPrice) * i.quantity;
+    }
+    return total;
+  }
+
+  double get _subtotal {
+    if (_cart != null) return _cart!.subtotalValue;
+    return _calculateSubtotal(_items);
+  }
+
   int get _totalQty {
+    if (_cart != null) return _cart!.totalItems;
+
     int n = 0;
     for (final i in _items) {
       n += i.quantity;
@@ -69,19 +106,61 @@ class _CartTabState extends State<CartTab> {
   Future<void> _changeQty(CartItem item, int newQty) async {
     if (newQty < 1) return;
 
-    // Optional guard with stock
+    // Guard with stock
     final safeQty = min(newQty, max(item.productStock, 1));
 
     try {
-      final updated = await _service.updateQuantity(
-        itemId: item.id,
-        quantity: safeQty,
-      );
+      // Try updateQuantity first (PATCH method)
+      try {
+        final updated = await _service.updateQuantity(
+          itemId: item.id,
+          quantity: safeQty,
+        );
 
-      setState(() {
-        final idx = _items.indexWhere((e) => e.id == item.id);
-        if (idx != -1) _items[idx] = updated;
-      });
+        setState(() {
+          final idx = _items.indexWhere((e) => e.id == item.id);
+          if (idx != -1) {
+            _items[idx] = updated;
+            // Update cart if exists
+            if (_cart != null) {
+              final cartItems = List<CartItem>.from(_cart!.items);
+              final cartIdx = cartItems.indexWhere((e) => e.id == item.id);
+              if (cartIdx != -1) {
+                cartItems[cartIdx] = updated;
+                _cart = Cart(
+                  id: _cart!.id,
+                  items: cartItems,
+                  subtotal: _calculateSubtotal(cartItems).toStringAsFixed(2),
+                  total: _calculateSubtotal(cartItems).toStringAsFixed(2),
+                );
+              }
+            }
+          }
+        });
+      } catch (e) {
+        // Fallback to add/remove approach
+        if (safeQty > item.quantity) {
+          // Increase quantity
+          final cart = await _service.addToCart(
+            productId: item.productId,
+            quantity: safeQty - item.quantity,
+          );
+          setState(() {
+            _cart = cart;
+            _items = cart.items;
+          });
+        } else {
+          // Decrease quantity
+          final cart = await _service.removeFromCart(
+            productId: item.productId,
+            quantity: item.quantity - safeQty,
+          );
+          setState(() {
+            _cart = cart;
+            _items = cart.items;
+          });
+        }
+      }
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -90,11 +169,106 @@ class _CartTabState extends State<CartTab> {
     }
   }
 
+  Future<void> _removeOne(CartItem item) async {
+    try {
+      if (item.quantity <= 1) {
+        await _removeItem(item);
+      } else {
+        // Try removeFromCart with quantity first
+        try {
+          final cart = await _service.removeFromCart(
+            productId: item.productId,
+            quantity: 1,
+          );
+          setState(() {
+            _cart = cart;
+            _items = cart.items;
+          });
+        } catch (e) {
+          // Fallback to updateQuantity
+          await _changeQty(item, item.quantity - 1);
+        }
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Remove failed: $e')),
+      );
+    }
+  }
+
+  Future<void> _removeAll(CartItem item) async {
+    final yes = await _showConfirmDialog(
+      title: 'Remove item',
+      message: 'Remove "${item.productName}" from cart?',
+      confirmText: 'Remove',
+    );
+
+    if (yes != true) return;
+
+    try {
+      // Try removeFromCart without quantity first
+      try {
+        final cart = await _service.removeFromCart(
+          productId: item.productId,
+        );
+        setState(() {
+          _cart = cart;
+          _items = cart.items;
+        });
+      } catch (e) {
+        // Fallback to removeItem by ID
+        await _service.removeItem(item.id);
+        setState(() {
+          _items.removeWhere((e) => e.id == item.id);
+          if (_cart != null) {
+            final updatedItems = List<CartItem>.from(_cart!.items)
+              ..removeWhere((e) => e.id == item.id);
+            _cart = Cart(
+              id: _cart!.id,
+              items: updatedItems,
+              subtotal: _calculateSubtotal(updatedItems).toStringAsFixed(2),
+              total: _calculateSubtotal(updatedItems).toStringAsFixed(2),
+            );
+          }
+        });
+      }
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${item.productName} removed')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Remove failed: $e')),
+      );
+    }
+  }
+
   Future<void> _removeItem(CartItem item) async {
+    final yes = await _showConfirmDialog(
+      title: 'Remove item',
+      message: 'Remove "${item.productName}" from cart?',
+      confirmText: 'Remove',
+    );
+
+    if (yes != true) return;
+
     try {
       await _service.removeItem(item.id);
       setState(() {
         _items.removeWhere((e) => e.id == item.id);
+        if (_cart != null) {
+          final updatedItems = List<CartItem>.from(_cart!.items)
+            ..removeWhere((e) => e.id == item.id);
+          _cart = Cart(
+            id: _cart!.id,
+            items: updatedItems,
+            subtotal: _calculateSubtotal(updatedItems).toStringAsFixed(2),
+            total: _calculateSubtotal(updatedItems).toStringAsFixed(2),
+          );
+        }
       });
 
       if (!mounted) return;
@@ -109,12 +283,16 @@ class _CartTabState extends State<CartTab> {
     }
   }
 
-  Future<void> _confirmRemove(CartItem item) async {
-    final yes = await showDialog<bool>(
+  Future<bool?> _showConfirmDialog({
+    required String title,
+    required String message,
+    required String confirmText,
+  }) {
+    return showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
-        title: const Text('Remove item'),
-        content: Text('Remove "${item.productName}" from cart?'),
+        title: Text(title),
+        content: Text(message),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -122,15 +300,11 @@ class _CartTabState extends State<CartTab> {
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Remove'),
+            child: Text(confirmText),
           ),
         ],
       ),
     );
-
-    if (yes == true) {
-      await _removeItem(item);
-    }
   }
 
   @override
@@ -142,6 +316,7 @@ class _CartTabState extends State<CartTab> {
           physics: const AlwaysScrollableScrollPhysics(),
           padding: const EdgeInsets.fromLTRB(12, 12, 12, 120),
           children: [
+            // Header
             Card(
               elevation: 0,
               child: Padding(
@@ -153,21 +328,23 @@ class _CartTabState extends State<CartTab> {
                       child: Icon(Icons.shopping_cart_outlined),
                     ),
                     const SizedBox(width: 12),
-                    const Expanded(
+                    Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(
+                          const Text(
                             'Cart',
                             style: TextStyle(
                               fontSize: 18,
                               fontWeight: FontWeight.w700,
                             ),
                           ),
-                          SizedBox(height: 2),
+                          const SizedBox(height: 2),
                           Text(
-                            'Manage quantities and remove items',
-                            style: TextStyle(fontSize: 13),
+                            _cart == null
+                                ? 'Manage quantities and remove items'
+                                : '${_cart!.items.length} items • ${_money(_cart!.totalValue)} total',
+                            style: const TextStyle(fontSize: 13),
                           ),
                         ],
                       ),
@@ -181,6 +358,8 @@ class _CartTabState extends State<CartTab> {
               ),
             ),
             const SizedBox(height: 10),
+
+            // Content
             if (_loading)
               const Card(
                 child: Padding(
@@ -209,17 +388,19 @@ class _CartTabState extends State<CartTab> {
                 ),
               )
             else
-              ..._items.map(_itemCard),
+              ..._items.map(_buildItemCard),
           ],
         ),
       ),
-      bottomSheet: _items.isEmpty ? null : _subtotalBar(),
+      bottomSheet: _items.isEmpty ? null : _buildSubtotalBar(),
     );
   }
 
-  Widget _itemCard(CartItem item) {
+  Widget _buildItemCard(CartItem item) {
     final unit = _toDouble(item.unitPrice);
     final total = _toDouble(item.totalPrice);
+    final outOfStock = item.productStock == 0;
+    final lowStock = item.productStock < 5 && item.productStock > 0;
 
     return Card(
       elevation: 0,
@@ -227,22 +408,81 @@ class _CartTabState extends State<CartTab> {
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const CircleAvatar(
+            CircleAvatar(
               radius: 22,
-              child: Icon(Icons.inventory_2_outlined),
+              backgroundColor: outOfStock
+                  ? Colors.red.shade100
+                  : lowStock
+                      ? Colors.orange.shade100
+                      : null,
+              child: Icon(
+                outOfStock ? Icons.error_outline : Icons.inventory_2_outlined,
+                color: outOfStock
+                    ? Colors.red
+                    : lowStock
+                        ? Colors.orange
+                        : null,
+              ),
             ),
             const SizedBox(width: 10),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    item.productName,
-                    style: const TextStyle(
-                      fontWeight: FontWeight.w700,
-                      fontSize: 15,
-                    ),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          item.productName,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w700,
+                            fontSize: 15,
+                          ),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      if (outOfStock)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.red.shade50,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: const Text(
+                            'Out of stock',
+                            style: TextStyle(
+                              color: Colors.red,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        )
+                      else if (lowStock)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.orange.shade50,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            'Only ${item.productStock} left',
+                            style: const TextStyle(
+                              color: Colors.orange,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
                   const SizedBox(height: 4),
                   Text('Unit price: ${_money(unit)}'),
@@ -250,11 +490,21 @@ class _CartTabState extends State<CartTab> {
                   const SizedBox(height: 4),
                   Text(
                     'Owner: ${item.productCreatedBy ?? "-"} • Unit: ${item.productUnitName ?? "-"}',
-                    style: const TextStyle(fontSize: 12),
+                    style: const TextStyle(fontSize: 12, color: Colors.grey),
                   ),
                   Text(
                     'Available stock: ${item.productStock}',
-                    style: const TextStyle(fontSize: 12),
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: outOfStock
+                          ? Colors.red
+                          : lowStock
+                              ? Colors.orange
+                              : Colors.grey,
+                      fontWeight: outOfStock || lowStock
+                          ? FontWeight.w700
+                          : FontWeight.normal,
+                    ),
                   ),
                 ],
               ),
@@ -266,31 +516,59 @@ class _CartTabState extends State<CartTab> {
                   children: [
                     IconButton(
                       visualDensity: VisualDensity.compact,
-                      onPressed: item.quantity > 1
-                          ? () => _changeQty(item, item.quantity - 1)
-                          : null,
-                      icon: const Icon(Icons.remove_circle_outline),
+                      onPressed: outOfStock
+                          ? null
+                          : () => _changeQty(item, item.quantity - 1),
+                      icon: Icon(
+                        Icons.remove_circle_outline,
+                        color: outOfStock ? Colors.grey : null,
+                      ),
                     ),
-                    Text(
-                      '${item.quantity}',
-                      style: const TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w700,
+                    Container(
+                      constraints: const BoxConstraints(minWidth: 30),
+                      child: Text(
+                        '${item.quantity}',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                        ),
                       ),
                     ),
                     IconButton(
                       visualDensity: VisualDensity.compact,
-                      onPressed: item.quantity < item.productStock
-                          ? () => _changeQty(item, item.quantity + 1)
-                          : null,
-                      icon: const Icon(Icons.add_circle_outline),
+                      onPressed:
+                          outOfStock || item.quantity >= item.productStock
+                              ? null
+                              : () => _changeQty(item, item.quantity + 1),
+                      icon: Icon(
+                        Icons.add_circle_outline,
+                        color: outOfStock || item.quantity >= item.productStock
+                            ? Colors.grey
+                            : null,
+                      ),
                     ),
                   ],
                 ),
-                TextButton.icon(
-                  onPressed: () => _confirmRemove(item),
-                  icon: const Icon(Icons.delete_outline),
-                  label: const Text('Remove'),
+                const SizedBox(height: 4),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      visualDensity: VisualDensity.compact,
+                      onPressed: outOfStock ? null : () => _removeOne(item),
+                      icon: const Icon(Icons.remove_shopping_cart_outlined),
+                      iconSize: 18,
+                      tooltip: 'Remove one',
+                    ),
+                    IconButton(
+                      visualDensity: VisualDensity.compact,
+                      onPressed: () => _removeAll(item),
+                      icon: const Icon(Icons.delete_outline),
+                      iconSize: 18,
+                      tooltip: 'Remove all',
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -300,7 +578,9 @@ class _CartTabState extends State<CartTab> {
     );
   }
 
-  Widget _subtotalBar() {
+  Widget _buildSubtotalBar() {
+    final hasOutOfStock = _items.any((item) => item.productStock == 0);
+
     return Material(
       elevation: 10,
       child: Container(
@@ -308,35 +588,69 @@ class _CartTabState extends State<CartTab> {
         padding: const EdgeInsets.fromLTRB(14, 12, 14, 20),
         child: SafeArea(
           top: false,
-          child: Row(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              Expanded(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text('Items: $_totalQty'),
-                    const SizedBox(height: 2),
-                    Text(
-                      'Subtotal: ${_money(_subtotal)}',
-                      style: const TextStyle(
-                        fontSize: 17,
-                        fontWeight: FontWeight.w800,
+              if (hasOutOfStock)
+                Container(
+                  margin: const EdgeInsets.only(bottom: 8),
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.red.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Row(
+                    children: [
+                      Icon(Icons.warning_amber, color: Colors.red, size: 16),
+                      SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Some items are out of stock',
+                          style: TextStyle(
+                            color: Colors.red,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
-              FilledButton.icon(
-                onPressed: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Checkout step comes next in our schedule'),
+              Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Items: $_totalQty'),
+                        const SizedBox(height: 2),
+                        Text(
+                          'Subtotal: ${_money(_subtotal)}',
+                          style: const TextStyle(
+                            fontSize: 17,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ],
                     ),
-                  );
-                },
-                icon: const Icon(Icons.payment_outlined),
-                label: const Text('Checkout'),
+                  ),
+                  FilledButton.icon(
+                    onPressed: hasOutOfStock
+                        ? null
+                        : () {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text(
+                                  'Checkout step comes next in our schedule',
+                                ),
+                              ),
+                            );
+                          },
+                    icon: const Icon(Icons.payment_outlined),
+                    label: const Text('Checkout'),
+                  ),
+                ],
               ),
             ],
           ),

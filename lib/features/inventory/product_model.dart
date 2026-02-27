@@ -1,89 +1,136 @@
 class Product {
   final int id;
   final String name;
-  final String? slug;
+
   final String? sku;
-  final String? barcode;
+  final String? price; // keep as String to avoid Decimal/double issues
+
+  final int stockQuantity;
+  final String? status;
+
+  final String? categoryName;
+  final String? createdByName;
+  final String? vendorName;
+  final String? unitName;
+
+  final DateTime? createdAt;
+  final DateTime? updatedAt;
+
   final String? description;
   final String? shortDescription;
-  final String? price;
-  final String? comparePrice;
-  final int stockQuantity;
-  final bool isInStock;
-  final String? status;
+
   final String? condition;
   final String? brand;
   final String? model;
   final String? color;
   final String? size;
   final String? material;
-  final String? categoryName;
-  final String? primaryImage;
-  final String? createdByName;
-  final String? vendorName;
-  final String? unitName;
-  final DateTime? createdAt;
-  final DateTime? updatedAt;
 
-  Product({
+  /// Prefer backend boolean if provided; otherwise derive.
+  final bool? isInStockRaw;
+
+  const Product({
     required this.id,
     required this.name,
-    this.slug,
+    required this.stockQuantity,
     this.sku,
-    this.barcode,
+    this.price,
+    this.status,
+    this.categoryName,
+    this.createdByName,
+    this.vendorName,
+    this.unitName,
+    this.createdAt,
+    this.updatedAt,
     this.description,
     this.shortDescription,
-    this.price,
-    this.comparePrice,
-    required this.stockQuantity,
-    required this.isInStock,
-    this.status,
     this.condition,
     this.brand,
     this.model,
     this.color,
     this.size,
     this.material,
-    this.categoryName,
-    this.primaryImage,
-    this.createdByName,
-    this.vendorName,
-    this.unitName,
-    this.createdAt,
-    this.updatedAt,
+    this.isInStockRaw,
   });
 
+  bool get isInStock {
+    if (isInStockRaw != null) return isInStockRaw!;
+    if ((status ?? 'active') == 'out_of_stock') return false;
+    return stockQuantity > 0;
+  }
+
+  static int _asInt(dynamic v, {int fallback = 0}) {
+    if (v == null) return fallback;
+    if (v is int) return v;
+    return int.tryParse(v.toString()) ?? fallback;
+  }
+
+  static String? _asString(dynamic v) {
+    if (v == null) return null;
+    final s = v.toString();
+    return s.isEmpty ? null : s;
+  }
+
+  static DateTime? _asDate(dynamic v) {
+    if (v == null) return null;
+    if (v is DateTime) return v;
+    return DateTime.tryParse(v.toString());
+  }
+
   factory Product.fromJson(Map<String, dynamic> json) {
+    // Handle a few common backend shapes safely.
+    final category = json['category'];
+    final createdBy = json['created_by'];
+    final vendor = json['vendor'];
+    final unit = json['unit'];
+
     return Product(
-      id: (json['id'] as num).toInt(),
-      name: (json['name'] ?? '').toString(),
-      slug: json['slug']?.toString(),
-      sku: json['sku']?.toString(),
-      barcode: json['barcode']?.toString(),
-      description: json['description']?.toString(),
-      shortDescription: json['short_description']?.toString(),
-      price: json['final_price']?.toString() ?? json['price']?.toString(),
-      comparePrice: json['compare_price']?.toString(),
-      stockQuantity: ((json['stock_quantity'] ?? 0) as num).toInt(),
-      isInStock: (json['is_in_stock'] ?? false) == true,
-      status: json['status']?.toString(),
-      condition: json['condition']?.toString(),
-      brand: json['brand']?.toString(),
-      model: json['model']?.toString(),
-      color: json['color']?.toString(),
-      size: json['size']?.toString(),
-      material: json['material']?.toString(),
-      categoryName: json['category_name']?.toString(),
-      primaryImage: json['primary_image']?.toString(),
-      createdByName: json['created_by_name']?.toString(),
-      vendorName: json['vendor_name']?.toString(),
-      unitName: json['unit_name']?.toString(),
-      createdAt: json['created_at'] != null
-          ? DateTime.tryParse(json['created_at'].toString())
-          : null,
-      updatedAt: json['updated_at'] != null
-          ? DateTime.tryParse(json['updated_at'].toString())
-          : null,
+      id: _asInt(json['id']),
+      name: _asString(json['name']) ?? '',
+
+      sku: _asString(json['sku']),
+      // Backend might send: final_price, price, unit_price etc.
+      price: _asString(json['final_price']) ?? _asString(json['price']),
+
+      // Backend might send: stock_quantity or quantity
+      stockQuantity: _asInt(json['stock_quantity'] ?? json['quantity']),
+      status: _asString(json['status']),
+
+      categoryName: category is Map<String, dynamic>
+          ? _asString(category['name'])
+          : _asString(json['category_name']),
+
+      createdByName: createdBy is Map<String, dynamic>
+          ? _asString(createdBy['username']) ??
+              _asString(createdBy['full_name']) ??
+              _asString(createdBy['name'])
+          : _asString(json['created_by_name']),
+
+      vendorName: vendor is Map<String, dynamic>
+          ? _asString(vendor['username']) ??
+              _asString(vendor['name']) ??
+              _asString(vendor['company'])
+          : _asString(json['vendor_name']),
+
+      unitName: unit is Map<String, dynamic>
+          ? _asString(unit['name'])
+          : _asString(json['unit_name']),
+
+      createdAt: _asDate(json['created_at']),
+      updatedAt: _asDate(json['updated_at']),
+
+      description: _asString(json['description']),
+      shortDescription: _asString(json['short_description']),
+
+      condition: _asString(json['condition']),
+      brand: _asString(json['brand']),
+      model: _asString(json['model']),
+      color: _asString(json['color']),
+      size: _asString(json['size']),
+      material: _asString(json['material']),
+
+      isInStockRaw:
+          json['is_in_stock'] is bool ? json['is_in_stock'] as bool : null,
     );
   }
 }
